@@ -1,0 +1,6 @@
+# instruction dialect from perf 6.12.0-124.56.1.el10_1 (--itrace=i1ibe)
+# Grammar: pid/tid [cpu] time: event:u: flags addr ip ilen: N insn: bytes
+# Sequential samples print addr=0 then ip. Call samples print target then call-site ip.
+1518114/1518114 [062] 513961.572230317:  instructions:u:                                        0     7f5459d6c440 ilen: 3 insn: 48 89 e7
+1518114/1518114 [062] 513961.572230317:  instructions:u:   call                      7f5459d6d140     7f5459d6c443 ilen: 5 insn: e8 f8 0c 00 00
+1518114/1518114 [062] 513961.572230317:  branches:u:   call                       7f5459d6c443 =>     7f5459d6d140 ilen: 5 insn: e8 f8 0c 00 00

@@ -1,0 +1,3 @@
+Events enabled
+[ perf record: Woken up 30 times to write data ]
+[ perf record: Captured and wrote 2.111 MB perf.data ]

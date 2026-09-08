@@ -1,0 +1,35 @@
+[package]
+name = "libipt-sys"
+description = "Bindgen-generated bindings for Intel's libipt (Processor Trace) library"
+repository = "https://github.com/sum-catnip/libipt-sys"
+license = "MIT"
+version = "0.2.4"
+documentation = "https://docs.rs/libipt-sys/"
+authors = [
+  "catnip <catnip@catnip.fyi>",
+  "Marcondiro <cavenatimarco+libiptrs@gmail.com>",
+]
+edition = "2021"
+exclude = [
+  "libipt/doc",
+  "libipt/pevent",
+  "libipt/ptdump",
+  "libipt/ptseg",
+  "libipt/pttc",
+  "libipt/ptunit",
+  "libipt/ptxed",
+  "libipt/script",
+  "libipt/sideband",
+  "libipt/test",
+  "libipt/.gitignore",
+  "libipt/CONTRIBUTING",
+  "libipt/README",
+]
+
+[features]
+# Use the master branch of libipt from GitHub instead of the included libipt submodule.
+libipt_master = []
+
+[build-dependencies]
+cmake = "0.1.50"
+bindgen = "0.72.0"

@@ -1,0 +1,48 @@
+[package]
+name = "trace-mcp"
+version = "0.1.0"
+edition = "2024"
+description = "Intel Processor Trace execution debugger for coding agents, as an MCP server and CLI"
+readme = "README.md"
+license = "MIT"
+authors = ["OctopusTakopi"]
+repository = "https://github.com/OctopusTakopi/trace-mcp"
+keywords = ["intel-pt", "tracing", "mcp", "debugger", "perf"]
+categories = ["development-tools::debugging", "development-tools::profiling"]
+
+[dependencies]
+addr2line = "0.27.1"
+clap = { version = "4.6.6", features = ["derive"] }
+getrandom = "0.4.3"
+gimli = "0.34.0"
+hex = "0.4.3"
+iced-x86 = "1.21.0"
+libc = "0.2"
+libipt = { version = "0.4", features = ["libipt_master"] }
+libipt-sys = "0.2"
+object = "0.40.0"
+rmcp = { version = "3.2.0", features = ["server", "macros", "transport-io", "client", "transport-child-process", "schemars"] }
+rustc-demangle = "0.1.28"
+rustix = { version = "1.1.4", features = ["std", "process", "fs", "pipe", "param", "thread"] }
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "signal", "fs", "time", "io-std", "net"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+which = "8.0.6"
+
+[patch.crates-io]
+libipt-sys = { path = "vendor/libipt-sys" }
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false
+
+[[example]]
+name = "pt_fixture"
+path = "examples/pt_fixture.rs"

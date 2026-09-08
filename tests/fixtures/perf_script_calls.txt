@@ -1,0 +1,10 @@
+# branches and sideband from perf 6.12.0-124.56.1.el10_1 (Intel PT, --itrace=be)
+# Grammar: pid/tid [cpu] time: event:u: flags ip => addr
+1518114/1518114 [062] 513961.572104246: PERF_RECORD_COMM exec: pt_fixture:1518114/1518114
+1518114/1518114 [062] 513961.572140369: PERF_RECORD_MMAP2 1518114/1518114: [0x55d5329f8000(0x43000) @ 0x16000 <818137d5a9e8f63162a02db27e7cfd9855cd726d>]: r-xp /tmp/pt_fixture
+1518114/1518114 [062] 513961.572226468:  branches:u:   tr strt jmp                           0 =>     7f5459d6c440
+1518114/1518114 [062] 513961.572230317:  branches:u:   call                       7f5459d6c443 =>     7f5459d6d140
+1518114/1518114 [062] 513961.572236090:  branches:u:   jcc                        7f5459d6d1c0 =>     7f5459d6d1df
+1518114/1518114 [062] 513961.572236090:  branches:u:   jmp                        7f5459d6d685 =>     7f5459d6d1ce
+1518114/1518114 [062] 513961.572240000:  branches:u:   return                     7f5459d6d210 =>     7f5459d6c448
+# ========
