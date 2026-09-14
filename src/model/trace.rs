@@ -182,6 +182,9 @@ pub struct SnapshotManifest {
     /// `perf` (perf record). Missing in snapshots older than 2026-09-08.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorder: Option<String>,
+    /// Number of direct-recorder AUX rings that wrapped before capture ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapped_rings: Option<Count>,
     /// The traced process tree's root pid (direct recorder).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_pid: Option<u32>,

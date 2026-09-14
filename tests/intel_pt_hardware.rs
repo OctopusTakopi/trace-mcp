@@ -601,29 +601,60 @@ fn tiny_aux_does_not_claim_complete_history() {
         .expect("tiny aux capture");
     let stderr = String::from_utf8_lossy(&out.stderr);
     eprintln!("{stderr}");
-    if let Some(snap) = field(&stderr, "snapshot_id=") {
-        let q = query_json(dir.path(), &snap, "quality");
-        println!("{}", serde_json::to_string_pretty(&q).unwrap());
-        let trunc = q
-            .pointer("/data/ring_truncation")
-            .and_then(|v| v.as_bool())
-            .or_else(|| {
-                q.pointer("/quality/ring_truncation")
-                    .and_then(|v| v.as_bool())
-            })
-            .unwrap_or(false);
-        let incomplete = q
-            .pointer("/data/incomplete_span_count")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                q.pointer("/data/undecodable_prefix")
-                    .and_then(|v| v.as_bool().map(|b| if b { "1" } else { "0" }))
-            });
-        assert!(
-            trunc || incomplete.unwrap_or("0") != "0" || q.to_string().contains("incomplete"),
-            "tiny AUX wrap should expose incomplete history: {q}"
-        );
-    }
+    assert!(out.status.success(), "tiny AUX capture failed: {stderr}");
+    let snap = field(&stderr, "snapshot_id=").expect("snapshot_id in stderr");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            dir.path()
+                .join("snapshots")
+                .join(&snap)
+                .join("manifest.json"),
+        )
+        .expect("snapshot manifest"),
+    )
+    .expect("snapshot manifest JSON");
+    let wrapped = manifest
+        .get("wrapped_rings")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(0);
+    assert!(wrapped > 0, "tiny AUX ring should wrap: {manifest}");
+    assert!(
+        stderr.contains("AUX ring") && stderr.contains("wrapped"),
+        "run summary should report the wrap: {stderr}"
+    );
+    assert!(
+        stderr.contains("--aux-bytes"),
+        "run summary should recommend a larger ring: {stderr}"
+    );
+    assert!(
+        stderr.contains("aux=256KiB/thread"),
+        "run summary should report a sub-MiB ring exactly: {stderr}"
+    );
+
+    let q = query_json(dir.path(), &snap, "quality");
+    println!("{}", serde_json::to_string_pretty(&q).unwrap());
+    let trunc = q
+        .pointer("/data/ring_truncation")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            q.pointer("/quality/ring_truncation")
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false);
+    let incomplete = q
+        .pointer("/data/incomplete_span_count")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            q.pointer("/data/undecodable_prefix")
+                .and_then(|v| v.as_bool().map(|b| if b { "1" } else { "0" }))
+        });
+    assert!(
+        trunc || incomplete.unwrap_or("0") != "0" || q.to_string().contains("incomplete"),
+        "tiny AUX wrap should expose incomplete history: {q}"
+    );
 }
 
 #[test]

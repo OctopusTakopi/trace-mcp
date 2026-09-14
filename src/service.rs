@@ -1622,6 +1622,7 @@ async fn capture_task(
     };
 
     let mut recorder_notes: Vec<String> = Vec::new();
+    let mut wrapped_rings = None;
     match &mut rec {
         Rec::Perf(p) => {
             let _ = p
@@ -1635,10 +1636,12 @@ async fn capture_task(
                 harvest_proc_maps(pid, &images_dir, &mut archived, limits.image_budget);
             }
             let raw = d.write(&perf_data)?;
+            let wrapped = d.wrapped_rings();
+            wrapped_rings = Some(Count(wrapped as u64));
             recorder_notes.push(format!(
                 "direct recorder: {} threads traced, {} rings wrapped, {} of {} AUX bytes used, {raw} raw bytes",
                 d.traced_threads(),
-                d.wrapped_rings(),
+                wrapped,
                 d.aux_used(),
                 req.config.max_total_aux_bytes
             ));
@@ -1763,6 +1766,7 @@ async fn capture_task(
             Rec::Perf(_) => "perf".to_string(),
             Rec::Direct(_) => "direct".to_string(),
         }),
+        wrapped_rings,
         root_pid: match &rec {
             Rec::Direct(d) => d.root_pid,
             Rec::Perf(_) => None,

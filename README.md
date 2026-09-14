@@ -215,9 +215,12 @@ Most settings travel with the request (`config` in `trace_start`, flags on
 ## Limits worth knowing
 
 - History is bounded by the ring. Depending on branch density, a tight
-  loop can fill the default 32 MiB in tens of milliseconds; an I/O-bound
-  thread keeps much longer. The run summary and summary query report
-  covered time per thread.
+  loop can fill the default 32 MiB in tens of milliseconds (about 22 ms
+  on a 1-thread busy replay); an I/O-bound thread keeps much longer.
+  `--after-ms` only chooses when to stop and dump that tail. The run
+  summary prints covered time; when a direct-recorder ring actually
+  wrapped, it points at `--aux-bytes` or (for launches)
+  `--trigger-symbol` + `--tail-ms`.
 - The direct recorder uses one 32 MiB ring per thread within the 128 MiB
   budget. `--cpus` pins the workload but does not enlarge a single
   thread's ring; use `--aux-bytes` to request more history. With the perf

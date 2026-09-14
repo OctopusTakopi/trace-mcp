@@ -71,6 +71,12 @@ remedy, so a failing one says what to change.
      the current PT ring tail. It does not retain the whole interval when
      a hot thread wraps its ring. `max_capture_ms` defaults to 30000 and
      is raised automatically to cover a larger `after_ms` or `tail_ms`.
+     After decode, `trace_query kind: summary` reports `covered_ns` per
+     thread; that is the history that is really there. A 32 MiB ring of a
+     1-thread busy loop is on the order of 20 ms. Snapshot status reports
+     `wrapped_rings` for the direct recorder. Use
+     `config.aux_bytes_per_buffer` for more history, or a symbol trigger
+     plus `tail_ms` for a later window.
    - `trigger`: `{"kind":"symbol","symbol":"my_crate::decode_batch","hits":5}`
      snapshots on the fifth call of that function (an exact demangled
      path, a raw symbol, or a unique substring; the function needs a

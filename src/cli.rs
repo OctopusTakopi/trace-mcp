@@ -956,7 +956,11 @@ fn coverage_summary_text(
         fields.push(format!("of after_ms={ms}"));
     }
     if let Some(bytes) = aux {
-        fields.push(format!("aux={}MiB/thread", bytes >> 20));
+        fields.push(if bytes >= 1 << 20 {
+            format!("aux={}MiB/thread", bytes >> 20)
+        } else {
+            format!("aux={}KiB/thread", bytes >> 10)
+        });
     }
     fields.push(format!("threads={thread_count}"));
     if thread_count != threads.len() as u64 {
@@ -969,7 +973,24 @@ fn coverage_summary_text(
             value_u64(t.get("covered_ns")?)? as f64 / 1e6
         ))
     }));
-    Some(fields.join("  "))
+    let mut out = fields.join("  ");
+    let wrapped_rings = status.get("wrapped_rings").and_then(value_u64).unwrap_or(0);
+    if wrapped_rings > 0 {
+        let suffix = if wrapped_rings == 1 { "" } else { "s" };
+        out.push_str(&format!(
+            "\nhint: {wrapped_rings} AUX ring{suffix} wrapped; capture retained only ring tails; --aux-bytes buys more history"
+        ));
+        let launch = status
+            .get("target")
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+            == Some("launch");
+        let trigger_configured = status.get("trigger").is_some_and(|v| !v.is_null());
+        if launch && !trigger_configured {
+            out.push_str("; --trigger-symbol + --tail-ms selects a later window");
+        }
+    }
+    Some(out)
 }
 
 /// `filter:my_crate::hot[@/path/to/image]`.
@@ -1527,6 +1548,9 @@ mod tests {
         });
         let status = serde_json::json!({
             "recorder": "direct",
+            "capture_reason": "after_ms",
+            "wrapped_rings": "1",
+            "target": { "kind": "launch", "argv": ["/bin/true"] },
             "requested_config": IntelPtConfig::default()
         });
         let summary = coverage_summary_text(&page, &status, Some(20_000)).unwrap();
@@ -1535,6 +1559,133 @@ mod tests {
         assert!(summary.contains("shown_threads=2"));
         assert!(summary.contains("t_1=22.100ms"));
         assert!(summary.contains("t_2=10.000ms"));
+        assert!(summary.contains("hint: 1 AUX ring wrapped"));
+        assert!(summary.contains("--aux-bytes"));
+        assert!(summary.contains("--trigger-symbol"));
+    }
+
+    #[test]
+    fn coverage_summary_omits_ring_hint_without_a_wrap() {
+        let page = serde_json::json!({
+            "data": [{
+                "thread_count": 1,
+                "max_thread_covered_ns": "40000000",
+                "threads": [{ "thread_id": "t_1", "covered_ns": "40000000" }]
+            }]
+        });
+        let status = serde_json::json!({
+            "recorder": "direct",
+            "capture_reason": "after_ms",
+            "wrapped_rings": "0",
+            "target": { "kind": "launch", "argv": ["/bin/true"] }
+        });
+        let summary = coverage_summary_text(&page, &status, Some(50)).unwrap();
+        assert!(summary.contains("covered 40.000ms"));
+        assert!(!summary.contains("hint:"));
+    }
+
+    #[test]
+    fn coverage_summary_warns_when_an_early_capture_wrapped() {
+        let page = serde_json::json!({
+            "data": [{
+                "thread_count": 1,
+                "max_thread_covered_ns": "1000000",
+                "threads": [{ "thread_id": "t_1", "covered_ns": "1000000" }]
+            }]
+        });
+        for reason in ["target_exit", "trigger", "stop", "time_limit"] {
+            let status = serde_json::json!({
+                "recorder": "direct",
+                "capture_reason": reason,
+                "wrapped_rings": "1",
+                "target": { "kind": "launch", "argv": ["/bin/true"] }
+            });
+            let summary = coverage_summary_text(&page, &status, Some(120_000)).unwrap();
+            assert!(
+                summary.contains("hint: 1 AUX ring wrapped"),
+                "capture reason {reason}"
+            );
+        }
+        let status = serde_json::json!({
+            "recorder": "direct",
+            "capture_reason": "target_exit",
+            "wrapped_rings": "1",
+            "target": { "kind": "launch", "argv": ["/bin/true"] }
+        });
+        let summary = coverage_summary_text(&page, &status, None).unwrap();
+        assert!(summary.contains("hint: 1 AUX ring wrapped"));
+    }
+
+    #[test]
+    fn coverage_summary_does_not_recommend_a_trigger_when_one_fired() {
+        let page = serde_json::json!({
+            "data": [{
+                "thread_count": 1,
+                "max_thread_covered_ns": "22000000",
+                "threads": [{ "thread_id": "t_1", "covered_ns": "22000000" }]
+            }]
+        });
+        let status = serde_json::json!({
+            "recorder": "direct",
+            "capture_reason": "trigger",
+            "wrapped_rings": "1",
+            "target": { "kind": "launch", "argv": ["replay"] },
+            "trigger": { "kind": "symbol", "symbol": "replay::later", "hits": 5 }
+        });
+        let summary = coverage_summary_text(&page, &status, Some(120_000)).unwrap();
+        assert!(summary.contains("hint: 1 AUX ring wrapped"));
+        assert!(summary.contains("--aux-bytes"));
+        assert!(!summary.contains("--trigger-symbol"));
+        assert!(!summary.contains("--tail-ms"));
+    }
+
+    #[test]
+    fn coverage_summary_attach_hint_only_recommends_supported_flags() {
+        let page = serde_json::json!({
+            "data": [{
+                "thread_count": 1,
+                "max_thread_covered_ns": "22000000",
+                "threads": [{ "thread_id": "t_1", "covered_ns": "22000000" }]
+            }]
+        });
+        let mut config = IntelPtConfig::default();
+        config.aux_bytes_per_buffer = Some(256 << 10);
+        let status = serde_json::json!({
+            "recorder": "direct",
+            "capture_reason": "after_ms",
+            "wrapped_rings": "2",
+            "target": { "kind": "attach", "pid": 123 },
+            "requested_config": config
+        });
+        let summary = coverage_summary_text(&page, &status, Some(10_000)).unwrap();
+        assert!(summary.contains("hint: 2 AUX rings wrapped"));
+        assert!(summary.contains("aux=256KiB/thread"));
+        assert!(summary.contains("--aux-bytes"));
+        assert!(!summary.contains("--trigger-symbol"));
+        assert!(!summary.contains("--tail-ms"));
+    }
+
+    #[test]
+    fn coverage_summary_uses_wrap_evidence_not_max_thread_coverage() {
+        let page = serde_json::json!({
+            "data": [{
+                "thread_count": 2,
+                "max_thread_covered_ns": "20000000000",
+                "threads": [
+                    { "thread_id": "t_busy", "covered_ns": "22000000" },
+                    { "thread_id": "t_sparse", "covered_ns": "20000000000" }
+                ]
+            }]
+        });
+        let status = serde_json::json!({
+            "recorder": "direct",
+            "capture_reason": "after_ms",
+            "wrapped_rings": "1",
+            "target": { "kind": "launch", "argv": ["replay"] }
+        });
+        let summary = coverage_summary_text(&page, &status, Some(20_000)).unwrap();
+        assert!(summary.contains("covered 20000.000ms"));
+        assert!(summary.contains("hint: 1 AUX ring wrapped"));
     }
 
     #[test]
