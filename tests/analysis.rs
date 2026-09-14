@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use trace_mcp::analysis::hotpaths::{child_index, hotpaths};
 use trace_mcp::analysis::timeline::self_elapsed;
 use trace_mcp::model::{
-    EventRange, EventTime, FunctionSpan, LocalId, P99_MIN_SAMPLES, Selection, SpanCompleteness,
-    ThreadId, nearest_rank, relative_delta,
+    EventRange, EventTime, FunctionSpan, IntelPtConfig, LocalId, P99_MIN_SAMPLES, Selection,
+    SpanCompleteness, ThreadId, nearest_rank, relative_delta,
 };
+use trace_mcp::service::normalize_capture_bound;
 
 fn span(
     id: u32,
@@ -88,4 +89,15 @@ fn self_time_union() {
 fn quantile_policy() {
     let xs = [1u64, 2, 3, 4];
     assert_eq!(nearest_rank(&xs, 50), Some(2));
+}
+
+#[test]
+fn requested_stop_raises_capture_bound() {
+    let mut config = IntelPtConfig::default();
+    normalize_capture_bound(&mut config, Some(120_000), Some(50)).unwrap();
+    assert_eq!(config.max_capture_ms, 120_000);
+    assert!(normalize_capture_bound(&mut config, Some(0), None).is_err());
+    let mut tail_config = IntelPtConfig::default();
+    normalize_capture_bound(&mut tail_config, None, Some(60_000)).unwrap();
+    assert_eq!(tail_config.max_capture_ms, 60_000);
 }

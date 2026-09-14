@@ -8,6 +8,7 @@ fn launch_rejects_empty_argv() {
     let t = Target::Launch {
         argv: vec![],
         cwd: None,
+        env: Default::default(),
     };
     assert!(t.validate().is_err());
 }
@@ -39,6 +40,7 @@ async fn request_id_retry_and_restart_rediscovery() {
         target: Target::Launch {
             argv: vec!["/bin/true".into()],
             cwd: None,
+            env: Default::default(),
         },
         config: trace_mcp::model::IntelPtConfig::default(),
         after_ms: Some(80),
@@ -92,6 +94,7 @@ async fn request_id_retry_and_restart_rediscovery() {
     other.target = Target::Launch {
         argv: vec!["/bin/false".into()],
         cwd: None,
+        env: Default::default(),
     };
     let err = app.start_session(other).await.unwrap_err();
     assert_eq!(err.code, trace_mcp::ErrorCode::InvalidArgument);
@@ -161,6 +164,7 @@ async fn compare_queue_and_decode_slots_refuse_when_full() {
             function_pairs: Vec::new(),
             group: Default::default(),
             function_contains: None,
+            max_depth: None,
         })
         .await
         .unwrap_err();

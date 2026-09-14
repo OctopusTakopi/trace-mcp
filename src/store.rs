@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use rustix::fs::{FlockOperation, flock};
 use serde::Serialize;
@@ -17,10 +18,26 @@ pub struct Store {
     pub root: PathBuf,
     pub limits: Limits,
     lock: File,
+    mode: LockMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockMode {
+    Shared,
+    Exclusive,
 }
 
 impl Store {
     pub fn open(root: PathBuf, limits: Limits) -> Result<Self> {
+        Self::open_with(root, limits, LockMode::Exclusive, Duration::ZERO)
+    }
+
+    pub fn open_with(
+        root: PathBuf,
+        limits: Limits,
+        mode: LockMode,
+        wait: Duration,
+    ) -> Result<Self> {
         fs::create_dir_all(&root)?;
         for sub in ["sessions", "snapshots", "reports", "jobs", "staging"] {
             fs::create_dir_all(root.join(sub))?;
@@ -31,15 +48,41 @@ impl Store {
             .read(true)
             .write(true)
             .open(root.join("LOCK"))?;
-        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| {
-            Error::new(
-                ErrorCode::Busy,
-                format!("store {} is locked by another process", root.display()),
-            )
-            .with_next("Use a separate --store directory")
-        })?;
-        recover_staging(&root)?;
-        Ok(Self { root, limits, lock })
+        let operation = match mode {
+            LockMode::Shared => FlockOperation::NonBlockingLockShared,
+            LockMode::Exclusive => FlockOperation::NonBlockingLockExclusive,
+        };
+        let deadline = Instant::now() + wait;
+        loop {
+            match flock(&lock, operation) {
+                Ok(()) => break,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => {
+                    return Err(Error::new(
+                        ErrorCode::Busy,
+                        format!(
+                            "store {} is locked by another process after waiting {} ms",
+                            root.display(),
+                            wait.as_millis()
+                        ),
+                    )
+                    .with_next(
+                        "Retry, raise --store-wait-ms, or use a separate --store directory",
+                    ));
+                }
+            }
+        }
+        if mode == LockMode::Exclusive {
+            recover_staging(&root)?;
+        }
+        Ok(Self {
+            root,
+            limits,
+            lock,
+            mode,
+        })
     }
 
     pub fn session_path(&self, id: &SessionId) -> PathBuf {
@@ -120,6 +163,7 @@ impl Store {
     /// and return the bytes freed. Sessions and jobs that referred to it
     /// keep their records; their snapshot lookups report not found.
     pub fn remove_snapshot(&self, id: &SnapshotId) -> Result<u64> {
+        self.ensure_exclusive()?;
         let dir = self.snapshot_dir(id);
         if !dir.exists() {
             return Err(Error::not_found(format!("snapshot {id}")));
@@ -130,6 +174,7 @@ impl Store {
     }
 
     pub fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<()> {
+        self.ensure_exclusive()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -147,6 +192,7 @@ impl Store {
     }
 
     pub fn publish_dir(&self, staging: &Path, dest: &Path) -> Result<()> {
+        self.ensure_exclusive()?;
         if dest.exists() {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
@@ -199,6 +245,7 @@ impl Store {
     }
 
     pub fn import_bundle(&self, src: &Path) -> Result<SnapshotId> {
+        self.ensure_exclusive()?;
         let src = fs::canonicalize(src)?;
         let manifest_path = src.join("manifest.json");
         let manifest: SnapshotManifest = read_json(&manifest_path)?;
@@ -216,6 +263,17 @@ impl Store {
         self.ensure_budget(dir_size(&src)?)?;
         copy_dir(&src, &dest)?;
         Ok(manifest.snapshot_id)
+    }
+
+    fn ensure_exclusive(&self) -> Result<()> {
+        if self.mode == LockMode::Exclusive {
+            Ok(())
+        } else {
+            Err(
+                Error::new(ErrorCode::Busy, "store mutation requires an exclusive lock")
+                    .with_next("Reopen the store with LockMode::Exclusive"),
+            )
+        }
     }
 }
 
@@ -349,5 +407,63 @@ mod tests {
         assert!(store.ensure_budget(1).is_ok());
         drop(store);
         let _store2 = Store::open(dir.path().to_path_buf(), Limits::default()).unwrap();
+    }
+
+    #[test]
+    fn shared_readers_and_bounded_writer_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let reader1 = Store::open_with(
+            root.clone(),
+            Limits::default(),
+            LockMode::Shared,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let reader2 = Store::open_with(
+            root.clone(),
+            Limits::default(),
+            LockMode::Shared,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let read_only_write = reader1
+            .write_json(&root.join("must-not-exist.json"), &serde_json::json!({}))
+            .unwrap_err();
+        assert_eq!(read_only_write.code, ErrorCode::Busy);
+        assert!(!root.join("must-not-exist.json").exists());
+        let err = Store::open_with(
+            root.clone(),
+            Limits::default(),
+            LockMode::Exclusive,
+            Duration::ZERO,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.code, ErrorCode::Busy);
+
+        let wait_started = Instant::now();
+        let waited = Store::open_with(
+            root.clone(),
+            Limits::default(),
+            LockMode::Exclusive,
+            Duration::from_millis(30),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(waited.code, ErrorCode::Busy);
+        assert!(wait_started.elapsed() >= Duration::from_millis(20));
+
+        drop(reader1);
+        drop(reader2);
+        assert!(
+            Store::open_with(
+                root,
+                Limits::default(),
+                LockMode::Exclusive,
+                Duration::from_millis(500),
+            )
+            .is_ok()
+        );
     }
 }

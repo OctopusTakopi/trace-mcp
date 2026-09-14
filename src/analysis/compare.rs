@@ -343,6 +343,7 @@ mod tests {
             function_pairs: pairs,
             group: Default::default(),
             function_contains: None,
+            max_depth: None,
         }
     }
 

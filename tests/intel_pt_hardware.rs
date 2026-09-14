@@ -261,6 +261,8 @@ fn symbol_trigger_snapshots_on_nth_hit() {
             "ptfx_slow_path",
             "--trigger-hits",
             "20",
+            "--tail-ms",
+            "25",
             "--",
             fixture().to_str().unwrap(),
             "--candidate",
@@ -279,10 +281,14 @@ fn symbol_trigger_snapshots_on_nth_hit() {
     assert_eq!(m["trigger"]["symbol"], "ptfx_slow_path");
     assert!(m["trigger_address"].as_str().is_some(), "{m}");
     let summary = query_json(dir.path(), &snap, "summary");
-    let hit = summary["data"][0]["trigger_hit_ns"].as_u64();
+    let hit = summary["data"][0]["trigger_hit_ns"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("trigger trap must be located in the trace: {summary}"));
     assert!(
-        hit.is_some(),
-        "trigger trap must be located in the trace: {summary}"
+        summary["data"][0]["covered_end_ns"]
+            .as_u64()
+            .is_some_and(|end| end > hit),
+        "tail capture must retain execution after the trigger: {summary}"
     );
     let hot = query_json_args(
         dir.path(),

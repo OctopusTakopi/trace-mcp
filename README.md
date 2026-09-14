@@ -69,7 +69,7 @@ trace-mcp --store /path/to/store query <snapshot_id> --kind timeline --function 
 Other capture shapes:
 
 ```sh
-# stop after 500 ms instead of waiting for exit
+# run for 500 ms, then dump whatever history remains in each PT ring
 trace-mcp --store S run --after-ms 500 -- ./server
 
 # snapshot on the 5th call of a function (needs a symbol, so not inlined)
@@ -81,6 +81,27 @@ trace-mcp --store S run --address-filter filter:my_crate::hot_loop -- ./my_progr
 # attach to something already running; it is never signalled
 trace-mcp --store S attach --pid 12345 --after-ms 1000
 ```
+
+`--after-ms` is a wall-clock stop, not a promise to retain that entire
+interval. Each ring overwrites old trace data, so a hot thread may retain
+only the final tens of milliseconds. `--max-capture-ms` is the absolute
+hard cap (default 30000) and is raised automatically for a longer
+`--after-ms` or `--tail-ms`.
+
+For a later point in a long replay, use a symbol trigger rather than a
+long timer:
+
+```sh
+trace-mcp --store S run \
+  --max-capture-ms 90000 \
+  --trigger-symbol my_crate::engine::step --trigger-hits 1000000 --tail-ms 50 \
+  -- ./replay
+```
+
+The trigger counts calls to a real executable symbol (not an inlined-only
+DWARF function). Estimate the hit count from a shorter run's hotpaths or
+timeline. Set `--max-capture-ms` above the expected trigger time plus the
+requested tail; `--tail-ms` is clipped by that cap (and by `--after-ms`).
 
 Every command cleans up after itself when it exits: leftover control
 FIFOs, decode caches, unfinished analyses, and its own scratch directory
@@ -143,6 +164,23 @@ also what the hardware tests compare the native path against.
 | `images` | every program image in the snapshot with its hash and build id |
 | `comparison` | the result of `trace_compare` between two snapshots |
 
+For an agent-friendly hotpath view:
+
+```sh
+trace-mcp --store S query <snapshot_id> --kind hotpaths \
+  --group inline --sort self_time --format table --limit 40
+# Fetch page 2 using the prior result's `next_cursor: 40`.
+trace-mcp --store S query <snapshot_id> --kind hotpaths \
+  --group inline --sort self_time --format table --limit 40 --cursor 40
+```
+
+Formats are `text` (stable `key=value` columns with the path last),
+`table`, `csv`, and `json`; `--json` remains an alias for JSON output.
+CSV uses a fixed schema for each query kind and repeats `next_cursor` in
+each row so another page can be fetched without changing formats.
+For function hotpaths, `self_sum_ns=0` with nonzero inclusive time means
+the observed interval was entirely covered by callees.
+
 ## Store layout
 
 ```
@@ -176,10 +214,14 @@ Most settings travel with the request (`config` in `trace_start`, flags on
 
 ## Limits worth knowing
 
-- History is bounded by the ring. A tight loop fills 32 MiB in about a
-  second and a half; an I/O bound thread keeps several seconds. The
-  summary reports the covered time per thread, so nothing has to be
-  guessed.
+- History is bounded by the ring. Depending on branch density, a tight
+  loop can fill the default 32 MiB in tens of milliseconds; an I/O-bound
+  thread keeps much longer. The run summary and summary query report
+  covered time per thread.
+- The direct recorder uses one 32 MiB ring per thread within the 128 MiB
+  budget. `--cpus` pins the workload but does not enlarge a single
+  thread's ring; use `--aux-bytes` to request more history. With the perf
+  fallback, restricting CPUs does allow larger per-CPU rings.
 - Timestamps come from the PT timing packets, a few hundred nanoseconds
   apart. Durations shorter than that are quantized, not measured.
 - Only user space is traced. Time inside the kernel shows up as a gap

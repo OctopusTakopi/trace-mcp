@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 use crate::model::{CaptureReason, CompareRequest, DEFAULT_MCP_RESULT_BUDGET, QueryRequest};
 use crate::service::{App, DecodeRequest, PruneRequest, StartRequest, StatusSelect};
-use crate::store::Store;
+use crate::store::{LockMode, Store};
 
 const INSTRUCTIONS: &str = r#"Check PT availability. Capture a reproducible target. Poll until ready.
 Read summary and quality first; narrow to a thread, function, or time region.
@@ -56,7 +57,7 @@ impl TraceMcp {
     }
 
     #[tool(
-        description = "Start bounded Intel PT capture. Launch owns the workload and will terminate it when capture ends. Attach never signals the target. Returns a session id immediately; poll trace_status. Requires a caller request_id (retries with the same id and body return the same session). Optional trigger {kind:symbol,symbol,hits} snapshots on the N-th call of a function in the launched executable; {kind:fifo} lets the workload fire it by writing to $TRACE_MCP_TRIGGER. Optional config.cpus pins the launch to a CPU list for much deeper history."
+        description = "Start bounded Intel PT capture. Launch owns the workload and will terminate it when capture ends; attach never signals the target. after_ms is a wall-clock stop that dumps the current ring tail, not guaranteed coverage of the whole interval; max_capture_ms is the absolute hard cap, defaults to 30000, and is raised to after_ms/tail_ms. Returns a session id immediately; poll trace_status. Requires a caller request_id (same id and body is idempotent). Optional trigger {kind:symbol,symbol,hits} snapshots on the N-th call to a real, non-inlined symbol; set max_capture_ms above the expected hit time plus tail_ms, because the tail is clipped by after_ms/max_capture_ms. {kind:fifo} lets the workload write $TRACE_MCP_TRIGGER. config.cpus pins the launch but does not enlarge the direct recorder's default 32 MiB/thread ring; set config.aux_bytes_per_buffer for more history."
     )]
     async fn trace_start(&self, Parameters(p): Parameters<StartRequest>) -> CallToolResult {
         match self.app.start_session(p).await {
@@ -176,7 +177,7 @@ impl TraceMcp {
     }
 
     #[tool(
-        description = "Compare two snapshot regions by hotpath (group:path) or per function (group:function, optional function_contains). Strict mode needs matching workload fingerprints. Returns a comparison job id; read rows with trace_query on the report."
+        description = "Compare two snapshot regions by hotpath (group:path), function, or inline chain. Optional function_contains filters rows; inline max_depth defaults to 3 and 0 keeps full chains. Strict mode needs matching workload fingerprints. Returns a comparison job id; read rows with trace_query on the report."
     )]
     async fn trace_compare(&self, Parameters(p): Parameters<CompareRequest>) -> CallToolResult {
         match self.app.compare(p).await {
@@ -337,7 +338,19 @@ fn err(e: &Error) -> CallToolResult {
 }
 
 pub async fn serve_stdio(store_dir: PathBuf) -> crate::error::Result<()> {
-    let store = Store::open(store_dir, crate::model::Limits::default())?;
+    serve_stdio_with_wait(store_dir, Duration::from_millis(2_000)).await
+}
+
+pub async fn serve_stdio_with_wait(
+    store_dir: PathBuf,
+    store_wait: Duration,
+) -> crate::error::Result<()> {
+    let store = Store::open_with(
+        store_dir,
+        crate::model::Limits::default(),
+        LockMode::Exclusive,
+        store_wait,
+    )?;
     let (app, handle) = App::start(store);
     let server = TraceMcp::new(app.clone());
     let running = server.serve(rmcp::transport::stdio()).await.map_err(|e| {

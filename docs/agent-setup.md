@@ -67,23 +67,33 @@ remedy, so a failing one says what to change.
    which matters when a response was lost.
 
    Optional parts of the request:
-   - `after_ms`: stop after that many milliseconds instead of at exit.
+   - `after_ms`: stop after that many milliseconds of wall time and dump
+     the current PT ring tail. It does not retain the whole interval when
+     a hot thread wraps its ring. `max_capture_ms` defaults to 30000 and
+     is raised automatically to cover a larger `after_ms` or `tail_ms`.
    - `trigger`: `{"kind":"symbol","symbol":"my_crate::decode_batch","hits":5}`
      snapshots on the fifth call of that function (an exact demangled
      path, a raw symbol, or a unique substring; the function needs a
-     symbol, so inlined functions do not qualify). `{"kind":"fifo"}` lets
+     symbol, so inlined functions do not qualify). The hit counter starts
+     once that symbol is resolved and armed in the launched image. Estimate
+     a later replay's hit number from an earlier hotpaths/timeline query.
+     `{"kind":"fifo"}` lets
      the program fire the snapshot by writing a line to the path in
      `$TRACE_MCP_TRIGGER`. Without `tail_ms` the triggering thread is
      paused until the snapshot is written, so the trace ends exactly at
-     the trigger. With `tail_ms` it runs on and the aftermath lands in the
-     ring, which in a hot loop can overwrite the trigger itself.
+     the trigger. Set `max_capture_ms` above the expected hit time plus
+     the desired tail. With `tail_ms` it runs on until that tail or an
+     earlier `after_ms`/`max_capture_ms` cap; the aftermath lands in the
+     ring and can overwrite the trigger itself in a hot loop.
    - `config.address_filters`: `[{"kind":"filter","symbol":"my_crate::hot"}]`
      makes the hardware trace only inside that function. Up to the CPU's
      number of address ranges, usually 2. Code outside the range is not
      observed at all and appears as `trace_boundary` gaps.
-   - `config.cpus`: pin the launched program to those CPUs.
+   - `config.cpus`: pin the launched program to those CPUs. Under the
+     default direct recorder this does not enlarge a single thread's ring;
+     under the perf fallback it permits larger per-CPU rings.
    - `config.aux_bytes_per_buffer`: ring size per thread; the default is
-     32 MiB within a 128 MiB total.
+     32 MiB within a 128 MiB total. Set it explicitly to buy more history.
 
 2. Poll `trace_status` with `kind: session` until the state is
    `captured`, then `kind: job` on the initial decode job until it says
@@ -111,13 +121,19 @@ remedy, so a failing one says what to change.
    address for file and line plus the inline chain.
 
 7. To compare two runs, capture the second one, call `trace_compare`
-   (optionally `group: function` with `function_contains`), poll its job,
+   (optionally `group: function` with `function_contains`; inline comparison
+   defaults to `max_depth: 3`, while `max_depth: 0` keeps full chains), poll its job,
    and read the report with `trace_query` using `target.kind: report` and
    `query.kind: comparison`.
 
 Pages carry `next_cursor` (a decimal offset) and `hints` that say why a
 page is empty. Thread ids look like `t_<tid>`; a tid reused after a thread
 exited becomes `t_<tid>_g<n>`.
+
+For CLI paging, pass the returned offset back directly: `--limit 40`,
+then `--limit 40 --cursor 40` when the first page says
+`next_cursor: 40`. Hotpaths also support `--format table` and
+`--format csv`.
 
 A `trace_status` call on a snapshot returns its manifest with an image
 count and the first few image paths; `trace_query` with `kind: images`

@@ -115,6 +115,7 @@ pub enum HotpathGroup {
     Function,
     /// Rows per `symbol > inlined > inlined...` from executed blocks: exact
     /// instruction counts and quantized elapsed time inside LTO-flattened code.
+    #[serde(alias = "inlined")]
     Inline,
 }
 
@@ -207,12 +208,15 @@ pub struct CompareRequest {
     pub mode: CompareMode,
     #[serde(default)]
     pub function_pairs: Vec<FunctionPair>,
-    /// `path` (caller chains, default) or `function` (one row per function).
+    /// `path` (caller chains, default), `function`, or `inline`.
     #[serde(default)]
     pub group: HotpathGroup,
     /// Keep only rows whose path/function contains this substring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub function_contains: Option<String>,
+    /// Keep the innermost N frames (`0` is unlimited; inline defaults to 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

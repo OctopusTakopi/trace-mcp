@@ -123,8 +123,8 @@ pub struct StartRequest {
     #[serde(default)]
     pub trigger: Option<crate::model::Trigger>,
     /// After the trigger fires, keep recording this long so the ring holds
-    /// the trigger's aftermath as well as its history. Bounded by
-    /// `max_capture_ms`; a long tail can overwrite the trigger moment.
+    /// the trigger's aftermath as well as its history. The tail is clipped
+    /// by `after_ms` or `max_capture_ms`; a long tail can overwrite the trigger.
     #[serde(default)]
     pub tail_ms: Option<u64>,
 }
@@ -387,18 +387,7 @@ async fn handle_start(
 ) -> Result<StartResponse> {
     req.target.validate()?;
     req.config.validate(page_size())?;
-    if let Some(ms) = req.after_ms
-        && (ms == 0 || ms > req.config.max_capture_ms)
-    {
-        return Err(Error::invalid_argument(
-            "after_ms must satisfy 0 < after_ms <= max_capture_ms",
-        ));
-    }
-    if let Some(t) = req.tail_ms
-        && t > req.config.max_capture_ms
-    {
-        return Err(Error::invalid_argument("tail_ms must be <= max_capture_ms"));
-    }
+    normalize_capture_bound(&mut req.config, req.after_ms, req.tail_ms)?;
     if matches!(req.trigger, Some(crate::model::Trigger::Symbol { .. }))
         && !req.target.owns_workload()
     {
@@ -972,6 +961,60 @@ fn handle_cancel(c: &mut Coord, target: CancelTarget) -> Result<serde_json::Valu
     }
 }
 
+pub fn normalize_capture_bound(
+    config: &mut IntelPtConfig,
+    after_ms: Option<u64>,
+    tail_ms: Option<u64>,
+) -> Result<()> {
+    if after_ms == Some(0) {
+        return Err(Error::invalid_argument("after_ms must be > 0"));
+    }
+    // Requested stop times should not require callers to repeat the same
+    // value as a separate safety cap.
+    config.max_capture_ms = config
+        .max_capture_ms
+        .max(after_ms.unwrap_or(0))
+        .max(tail_ms.unwrap_or(0));
+    Ok(())
+}
+
+fn bounded_tail_deadline(
+    deadline: Instant,
+    after: Option<Instant>,
+    fired_at: Instant,
+    tail_ms: u64,
+) -> Instant {
+    let absolute_stop = after.map_or(deadline, |after| deadline.min(after));
+    let tail_deadline = fired_at + Duration::from_millis(tail_ms);
+    tail_deadline.min(absolute_stop)
+}
+
+fn expired_capture_reason(
+    now: Instant,
+    deadline: Instant,
+    after: Option<Instant>,
+    tail_deadline: Option<Instant>,
+) -> Option<CaptureReason> {
+    if now >= deadline {
+        Some(CaptureReason::TimeLimit)
+    } else if after.is_some_and(|stop| now >= stop) {
+        Some(CaptureReason::AfterMs)
+    } else if tail_deadline.is_some_and(|stop| now >= stop) {
+        Some(CaptureReason::Trigger)
+    } else {
+        None
+    }
+}
+
+fn hotpath_max_depth(group: crate::model::HotpathGroup, requested: Option<u32>) -> Option<usize> {
+    match (group, requested) {
+        (_, Some(0)) => None,
+        (_, Some(d)) => Some(d as usize),
+        (crate::model::HotpathGroup::Inline, None) => Some(3),
+        (_, None) => None,
+    }
+}
+
 fn handle_status(c: &Coord, sel: StatusSelect) -> Result<serde_json::Value> {
     match sel {
         StatusSelect::Session { id } => {
@@ -1467,9 +1510,9 @@ async fn capture_task(
             break CaptureReason::Stop;
         }
         let now = Instant::now();
-        let until_dead = deadline.saturating_duration_since(now);
-        let until_after = after.map(|t| t.saturating_duration_since(now));
-        let until_tail = tail_deadline.map(|t| t.saturating_duration_since(now));
+        if let Some(reason) = expired_capture_reason(now, deadline, after, tail_deadline) {
+            break reason;
+        }
         tokio::select! {
             biased;
             changed = stop.changed() => {
@@ -1485,6 +1528,27 @@ async fn capture_task(
                     }
                     None => {}
                 }
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                break CaptureReason::TimeLimit;
+            }
+            _ = async {
+                if let Some(stop) = after {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(stop)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                break CaptureReason::AfterMs;
+            }
+            _ = async {
+                if let Some(stop) = tail_deadline {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(stop)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                break CaptureReason::Trigger;
             }
             status = rec.wait() => {
                 let _ = status;
@@ -1506,27 +1570,6 @@ async fn capture_task(
                         crate::capture::direct::ReportAction::None => {}
                     }
                 }
-            }
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                break CaptureReason::TimeLimit;
-            }
-            _ = async {
-                if let Some(d) = until_after {
-                    tokio::time::sleep(d).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                break CaptureReason::AfterMs;
-            }
-            _ = async {
-                if let Some(d) = until_tail {
-                    tokio::time::sleep(d).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                break CaptureReason::Trigger;
             }
             line = async {
                 match trigger_rx.as_mut() {
@@ -1562,7 +1605,12 @@ async fn capture_task(
                                 Some(t) if t > 0 => {
                                     // Let the parked thread run for the tail.
                                     crate::capture::trigger::send_ack(&fifo_path);
-                                    tail_deadline = Some(Instant::now() + Duration::from_millis(t));
+                                    tail_deadline = Some(bounded_tail_deadline(
+                                        deadline,
+                                        after,
+                                        Instant::now(),
+                                        t,
+                                    ));
                                 }
                                 _ => break CaptureReason::Trigger,
                             }
@@ -1571,7 +1619,6 @@ async fn capture_task(
                 }
             }
         }
-        let _ = until_dead;
     };
 
     let mut recorder_notes: Vec<String> = Vec::new();
@@ -2896,6 +2943,10 @@ fn find_calls_origin(snap_dir: &Path) -> Option<crate::model::ClockOrigin> {
     .map(|am| am.origin)
 }
 
+pub fn query_store(store: &Store, req: QueryRequest) -> Result<serde_json::Value> {
+    handle_query_disk(&store.root, req, store.limits.mcp_result_budget)
+}
+
 fn handle_query_disk(root: &Path, req: QueryRequest, budget: usize) -> Result<serde_json::Value> {
     match &req.target {
         QueryTarget::Report { report_id } => query_report(root, report_id, &req, budget),
@@ -2962,11 +3013,13 @@ fn query_snapshot(
         "gap_count": manifest.quality.gap_count,
     });
 
+    let mut query_totals = None;
     let (data, next) = match &req.query {
         QueryKind::Summary => {
             let mut threads: Vec<crate::model::ThreadLifetime> =
                 read_jsonl(&dir.join("threads.jsonl")).unwrap_or_default();
             let thread_total = threads.len();
+            let max_thread_covered_ns = threads.iter().map(|t| t.covered_ns.0).max().unwrap_or(0);
             threads.sort_by(|a, b| b.branch_count.cmp(&a.branch_count).then(a.tid.cmp(&b.tid)));
             threads.truncate(MAX_SUMMARY_THREADS);
             let analyses: Vec<serde_json::Value> = list_analyses(&snap_dir);
@@ -2983,6 +3036,7 @@ fn query_snapshot(
                 "trigger_hit_ns": manifest.trigger_hit_ns,
                 "detail": manifest.detail,
                 "thread_count": thread_total,
+                "max_thread_covered_ns": max_thread_covered_ns,
                 "threads": threads.iter().map(|t| serde_json::json!({
                     "thread_id": t.id,
                     "pid": t.pid,
@@ -3070,7 +3124,7 @@ fn query_snapshot(
                 function_contains: function_contains.clone(),
                 group: *group,
                 sort: *sort,
-                max_depth: max_depth.map(|d| d as usize),
+                max_depth: hotpath_max_depth(*group, *max_depth),
             };
             let rows = if *group == crate::model::HotpathGroup::Inline {
                 if sel.start_ns.is_some() || sel.end_ns.is_some() {
@@ -3092,6 +3146,12 @@ fn query_snapshot(
             } else {
                 hotpaths_with(&spans, &names, &sel, &child_index(&spans), &opts)
             };
+            query_totals = Some(serde_json::json!({
+                "self_sum_ns": rows.iter().filter_map(|r| r.self_sum_ns).sum::<u64>(),
+                "inclusive_sum_ns": rows.iter().filter_map(|r| r.inclusive_sum_ns).sum::<u64>(),
+                "complete_calls": rows.iter().map(|r| r.complete_calls.0).sum::<u64>(),
+                "instructions": rows.iter().filter_map(|r| r.instructions).map(|n| n.0).sum::<u64>(),
+            }));
             let (page, next) = paginate(&rows, offset, limit);
             (serde_json::to_value(page).unwrap_or_default(), next)
         }
@@ -3254,13 +3314,18 @@ fn query_snapshot(
 
     let truncated = next.is_some();
     let hints = empty_result_hints(&req.query, &data, &sel, &dir);
+    let query_meta = serde_json::to_value(&req.query).unwrap_or_default();
     let envelope = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "snapshot_id": snapshot_id,
         "analysis_id": aid,
+        "kind": query_meta.get("kind"),
+        "group": query_meta.get("group"),
+        "sort": query_meta.get("sort"),
         "selection": sel,
         "quality": quality,
         "data": data,
+        "totals": query_totals,
         "hints": hints,
         "next_cursor": next,
         "truncated": truncated
@@ -3350,6 +3415,7 @@ fn query_report(
     let envelope = serde_json::json!({
         "schema_version": SCHEMA_VERSION,
         "report_id": report_id,
+        "kind": "comparison",
         "baseline_analysis_id": meta.get("baseline_analysis_id"),
         "candidate_analysis_id": meta.get("candidate_analysis_id"),
         "checks": meta.get("checks"),
@@ -3795,6 +3861,7 @@ fn compare_job(
     let opts = HotpathOptions {
         function_contains: req.function_contains.clone(),
         group: req.group,
+        max_depth: hotpath_max_depth(req.group, req.max_depth),
         ..HotpathOptions::default()
     };
     let inline_side =
@@ -3905,6 +3972,65 @@ pub fn wait_job(store: &Store, id: &JobId, timeout: Duration) -> Result<JobRecor
 mod query_tests {
     use super::*;
     use crate::model::{Address, EventRange, EventTime, FunctionSpan, LocalId, ThreadId};
+
+    #[test]
+    fn inline_depth_default_can_be_overridden() {
+        use crate::model::HotpathGroup;
+
+        assert_eq!(hotpath_max_depth(HotpathGroup::Inline, None), Some(3));
+        assert_eq!(hotpath_max_depth(HotpathGroup::Inline, Some(7)), Some(7));
+        assert_eq!(hotpath_max_depth(HotpathGroup::Inline, Some(0)), None);
+        assert_eq!(hotpath_max_depth(HotpathGroup::Path, None), None);
+    }
+
+    #[test]
+    fn trigger_tail_respects_every_absolute_stop() {
+        let armed = Instant::now();
+        let deadline = armed + Duration::from_secs(30);
+        let fired = armed + Duration::from_secs(10);
+
+        assert_eq!(
+            bounded_tail_deadline(deadline, None, fired, 5_000),
+            armed + Duration::from_secs(15)
+        );
+        assert_eq!(
+            bounded_tail_deadline(deadline, None, fired, 25_000),
+            deadline
+        );
+        let after = armed + Duration::from_secs(20);
+        assert_eq!(
+            bounded_tail_deadline(deadline, Some(after), fired, 15_000),
+            after
+        );
+        assert_eq!(
+            expired_capture_reason(deadline, deadline, Some(after), Some(after)),
+            Some(CaptureReason::TimeLimit)
+        );
+        assert_eq!(
+            expired_capture_reason(after, deadline, Some(after), None),
+            Some(CaptureReason::AfterMs)
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_hard_deadline_beats_always_ready_work() {
+        let deadline = Instant::now();
+        let mut ready_reports = 0;
+        let reason = loop {
+            if let Some(reason) = expired_capture_reason(Instant::now(), deadline, None, None) {
+                break reason;
+            }
+            tokio::select! {
+                biased;
+                _ = std::future::ready(()) => ready_reports += 1,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                    break CaptureReason::TimeLimit;
+                }
+            }
+        };
+        assert_eq!(reason, CaptureReason::TimeLimit);
+        assert_eq!(ready_reports, 0);
+    }
 
     fn span(id: u32, parent: Option<u32>, s: u64, e: Option<u64>, f: u32) -> FunctionSpan {
         FunctionSpan {

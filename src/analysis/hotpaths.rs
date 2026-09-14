@@ -206,10 +206,17 @@ pub fn inline_rows(
             path.push_str(" > ");
             path.push_str(c);
         }
+        // Match against the full chain. Truncation is presentation and
+        // aggregation only; it must not hide an outer function from filters.
         if let Some(f) = &opts.function_contains
             && !path.contains(f.as_str())
         {
             continue;
+        }
+        if let Some(depth) = opts.max_depth
+            && depth > 0
+        {
+            path = truncate_inline_depth(&path, depth);
         }
         let e = by_path.entry(path).or_default();
         e.0 += r.instructions.0;
@@ -252,6 +259,15 @@ fn truncate_depth(path: &str, depth: usize) -> String {
         return path.to_string();
     }
     format!(".../{}", parts[parts.len() - depth..].join("/"))
+}
+
+/// Keep the innermost `depth` frames of a ` > `-joined inline chain.
+fn truncate_inline_depth(path: &str, depth: usize) -> String {
+    let parts: Vec<&str> = path.split(" > ").collect();
+    if parts.len() <= depth {
+        return path.to_string();
+    }
+    format!("... > {}", parts[parts.len() - depth..].join(" > "))
 }
 
 #[derive(Default)]
@@ -371,5 +387,74 @@ mod tests {
         if let Some(c) = child {
             assert_eq!(c.complete_calls.0, 0);
         }
+    }
+
+    #[test]
+    fn inline_depth_truncates_and_merges() {
+        let rows = [
+            crate::model::InlineRow {
+                thread: ThreadId::from_raw("t_0").unwrap(),
+                function: Some(LocalId(1)),
+                chain: vec!["inner".into(), "middle".into(), "outer".into()],
+                instructions: Count(4),
+                blocks: Count(1),
+                elapsed_ns: Count(10),
+            },
+            crate::model::InlineRow {
+                thread: ThreadId::from_raw("t_0").unwrap(),
+                function: Some(LocalId(2)),
+                chain: vec!["inner".into(), "middle".into(), "other".into()],
+                instructions: Count(6),
+                blocks: Count(1),
+                elapsed_ns: Count(20),
+            },
+        ];
+        let names = HashMap::from([(1, "symbol_a".into()), (2, "symbol_b".into())]);
+        let selection = Selection {
+            thread_id: None,
+            start_ns: None,
+            end_ns: None,
+        };
+        let truncated = inline_rows(
+            &rows,
+            &names,
+            &selection,
+            &HotpathOptions {
+                group: HotpathGroup::Inline,
+                max_depth: Some(2),
+                ..HotpathOptions::default()
+            },
+        );
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].path, "... > middle > inner");
+        assert_eq!(truncated[0].instructions, Some(Count(10)));
+
+        let filtered = inline_rows(
+            &rows,
+            &names,
+            &selection,
+            &HotpathOptions {
+                function_contains: Some("symbol_a".into()),
+                group: HotpathGroup::Inline,
+                max_depth: Some(2),
+                ..HotpathOptions::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "... > middle > inner");
+        assert_eq!(filtered[0].instructions, Some(Count(4)));
+
+        let unlimited = inline_rows(
+            &rows,
+            &names,
+            &selection,
+            &HotpathOptions {
+                group: HotpathGroup::Inline,
+                max_depth: Some(0),
+                ..HotpathOptions::default()
+            },
+        );
+        assert_eq!(unlimited.len(), 2);
+        assert!(unlimited.iter().all(|r| r.path.starts_with("symbol_")));
     }
 }
